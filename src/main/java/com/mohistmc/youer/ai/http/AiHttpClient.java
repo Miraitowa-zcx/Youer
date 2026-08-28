@@ -7,4 +7,9 @@ import java.util.concurrent.CompletionStage;
 public interface AiHttpClient {
 
     CompletionStage<AiHttpResponse> execute(AiHttpRequest request, Duration timeout);
+
+    default CompletionStage<AiHttpResponse> execute(
+            AiHttpRequest request, Duration timeout, int maxResponseBytes) {
+        return execute(request, timeout);
+    }
 }

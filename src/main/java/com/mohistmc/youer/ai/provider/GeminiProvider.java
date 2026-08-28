@@ -22,6 +22,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletionStage;
 
 public final class GeminiProvider implements AiProvider {
@@ -67,19 +68,39 @@ public final class GeminiProvider implements AiProvider {
             }
             String role = item.role() == AiRole.ASSISTANT ? "model" : "user";
             Json parts = Json.array();
+            int partIndex = 0;
             for (AiContentPart part : item.content()) {
+                Json wirePart = null;
                 if (part instanceof AiTextContent(String text1)) {
-                    parts.add(Json.object().set("text", text1));
-                } else if (part instanceof AiToolCallContent(String id, String name, Json arguments)) {
-                    parts.add(Json.object().set("functionCall", Json.object().set("id", id)
-                            .set("name", name).set("args", Json.read(arguments.toString()))));
-                } else if (part instanceof AiToolResultContent(
-                        String callId, String name, String content, boolean error
+                    wirePart = Json.object().set("text", text1);
+                } else if (part instanceof AiToolCallContent(
+                        String id, String name, Json arguments, Map<String, String> attributes
                 )) {
-                    parts.add(Json.object().set("functionResponse", Json.object().set("id", callId)
-                            .set("name", name).set("response", Json.object()
-                                    .set("content", content).set("error", error))));
+                    Json functionCall = Json.object().set("name", name)
+                            .set("args", Json.read(arguments.toString()));
+                    if (wireIdPresent(attributes)) {
+                        functionCall.set("id", id);
+                    }
+                    wirePart = Json.object().set("functionCall", functionCall);
+                } else if (part instanceof AiToolResultContent(
+                        String callId, String name, String content, boolean error, Map<String, String> attributes
+                )) {
+                    Json functionResponse = Json.object().set("name", name)
+                            .set("response", Json.object()
+                                    .set("content", content).set("error", error));
+                    if (wireIdPresent(attributes)) {
+                        functionResponse.set("id", callId);
+                    }
+                    wirePart = Json.object().set("functionResponse", functionResponse);
                 }
+                if (wirePart != null) {
+                    String signature = item.attributes().get("gemini.thought_signature." + partIndex);
+                    if (signature != null) {
+                        wirePart.set("thoughtSignature", signature);
+                    }
+                    parts.add(wirePart);
+                }
+                partIndex++;
             }
             contents.add(Json.object().set("role", role).set("parts", parts));
         }
@@ -105,6 +126,7 @@ public final class GeminiProvider implements AiProvider {
     private AiChatResponse parseResponse(AiHttpResponse response) {
         Json root = ProviderSupport.parseJson(profile, response);
         List<AiContentPart> content = new ArrayList<>();
+        Map<String, String> attributes = new LinkedHashMap<>();
         String finishReason = null;
         try {
             for (Json candidate : root.at("candidates").asJsonList()) {
@@ -114,8 +136,20 @@ public final class GeminiProvider implements AiProvider {
                         content.add(new AiTextContent(text));
                     } else if (part.has("functionCall") && part.at("functionCall").isObject()) {
                         Json call = part.at("functionCall");
-                        content.add(new AiToolCallContent(ProviderSupport.string(call, "id"),
-                                ProviderSupport.string(call, "name"), call.at("args")));
+                        String wireId = ProviderSupport.string(call, "id");
+                        boolean wireIdPresent = wireId != null && !wireId.isBlank();
+                        content.add(new AiToolCallContent(
+                                wireIdPresent ? wireId : "gemini-" + UUID.randomUUID(),
+                                ProviderSupport.string(call, "name"), call.at("args"),
+                                wireIdPresent
+                                        ? Map.of()
+                                        : Map.of("gemini.wire_id_present", "false")));
+                    } else {
+                        continue;
+                    }
+                    String signature = ProviderSupport.string(part, "thoughtSignature");
+                    if (signature != null) {
+                        attributes.put("gemini.thought_signature." + (content.size() - 1), signature);
                     }
                 }
                 if (!content.isEmpty()) {
@@ -141,7 +175,11 @@ public final class GeminiProvider implements AiProvider {
                     ProviderSupport.integer(value, "totalTokenCount"));
         }
         return new AiChatResponse(
-                new AiMessage(AiRole.ASSISTANT, content, Map.of()),
+                new AiMessage(AiRole.ASSISTANT, content, attributes),
                 ProviderSupport.string(root, "modelVersion"), finishReason, usage);
+    }
+
+    private static boolean wireIdPresent(Map<String, String> attributes) {
+        return !"false".equals(attributes.get("gemini.wire_id_present"));
     }
 }

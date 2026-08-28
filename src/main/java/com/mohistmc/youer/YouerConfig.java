@@ -140,6 +140,10 @@ public class YouerConfig {
     public static int ai_max_history;
     public static int ai_worker_threads;
     public static int ai_queue_capacity;
+    public static int ai_max_response_chars;
+    public static int ai_max_pending_per_player;
+    public static int ai_history_idle_minutes;
+    public static boolean ai_allow_insecure_http;
     public static String ai_command;
     public static String ai_chat_format;
     public static boolean ai_tools_enable;
@@ -393,6 +397,10 @@ public class YouerConfig {
         ai_max_history = getInt("ai.max_history", 20);
         ai_worker_threads = getInt("ai.worker_threads", 4);
         ai_queue_capacity = getInt("ai.queue_capacity", 100);
+        ai_max_response_chars = getInt("ai.max_response_chars", 16384);
+        ai_max_pending_per_player = getInt("ai.max_pending_per_player", 2);
+        ai_history_idle_minutes = getInt("ai.history_idle_minutes", 30);
+        ai_allow_insecure_http = getBoolean("ai.allow_insecure_http", false);
         ai_command = getString("ai.command", "ai");
         ai_chat_format = getString("ai.chat_format", "<小小墨> %s");
         ai_tools_enable = getBoolean("ai.tools.enable", false);

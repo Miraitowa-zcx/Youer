@@ -23,10 +23,23 @@ public final class AiHttpToolParser {
     private final AiToolSchemaValidator validator = new AiToolSchemaValidator();
     private final Gson gson = new Gson();
 
-    public List<AiHttpToolDefinition> parse(List<? extends Map<?, ?>> config) {
+    public AiHttpToolParseResult parse(List<? extends Map<?, ?>> config) {
         List<AiHttpToolDefinition> result = new ArrayList<>();
-        for (Map<?, ?> item : config) result.add(parseOne(item));
-        return List.copyOf(result);
+        List<AiHttpToolParseResult.Failure> failures = new ArrayList<>();
+        for (int index = 0; index < config.size(); index++) {
+            Map<?, ?> item = config.get(index);
+            String name = item.get("name") == null || item.get("name").toString().isBlank()
+                    ? "<unnamed>" : item.get("name").toString();
+            try {
+                result.add(parseOne(item));
+            } catch (RuntimeException failure) {
+                String category = failure instanceof IllegalArgumentException
+                        ? "invalid_definition" : "configuration_error";
+                failures.add(new AiHttpToolParseResult.Failure(
+                        index, name, category, name + ": " + category));
+            }
+        }
+        return new AiHttpToolParseResult(result, failures);
     }
 
     private AiHttpToolDefinition parseOne(Map<?, ?> item) {

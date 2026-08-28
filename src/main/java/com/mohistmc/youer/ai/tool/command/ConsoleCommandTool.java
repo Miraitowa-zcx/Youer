@@ -9,14 +9,14 @@ import java.util.concurrent.CompletionStage;
 
 public final class ConsoleCommandTool implements AiToolHandler {
     private final AiCommandGateway gateway;
-    private final AiCommandSanitizer sanitizer;
-    public ConsoleCommandTool(AiCommandGateway gateway, AiCommandSanitizer sanitizer) {
-        this.gateway = gateway; this.sanitizer = sanitizer;
+    public ConsoleCommandTool(AiCommandGateway gateway) {
+        this.gateway = gateway;
     }
     @Override public CompletionStage<AiToolResult> execute(AiToolContext context, Json arguments) {
-        String command = sanitizer.normalize(arguments.at("command").asString());
+        String command = arguments.at("command").asString();
         return CompletableFuture.completedFuture(gateway.dispatchConsole(command)
-                ? AiToolResult.success("Console command dispatched")
+                ? AiToolResult.success("Bukkit accepted the console command dispatch; this does not prove the "
+                        + "command's business outcome. Validate observable server state before claiming success.")
                 : AiToolResult.error("Console command was not dispatched"));
     }
 }

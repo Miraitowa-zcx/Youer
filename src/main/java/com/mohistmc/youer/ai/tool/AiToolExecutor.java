@@ -5,16 +5,22 @@ import com.mohistmc.youer.ai.model.AiToolResultContent;
 import com.mohistmc.youer.api.ai.tool.AiToolContext;
 import com.mohistmc.youer.api.ai.tool.AiToolResult;
 import com.mohistmc.youer.util.I18n;
-import java.util.List;
+import java.time.Instant;
+import java.time.Clock;
+import java.time.Duration;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiPredicate;
 import java.util.function.Predicate;
 
-public final class AiToolExecutor {
+public final class AiToolExecutor implements AutoCloseable {
     public static final int MAX_RESULT_CHARS = 16_384;
 
     private final AiToolSchemaValidator validator;
@@ -23,6 +29,8 @@ public final class AiToolExecutor {
     private final BiPredicate<AiToolContext, String> permissionCheck;
     private final Predicate<AiToolContext> onlineCheck;
     private final AiToolAudit audit;
+    private final AiToolCallPreparer preparer;
+    private final ScheduledExecutorService scheduler;
 
     public AiToolExecutor(
             AiToolSchemaValidator validator,
@@ -47,36 +55,81 @@ public final class AiToolExecutor {
         this.permissionCheck = Objects.requireNonNull(permissionCheck, "permissionCheck");
         this.onlineCheck = Objects.requireNonNull(onlineCheck, "onlineCheck");
         this.audit = Objects.requireNonNull(audit, "audit");
+        this.preparer = new AiToolCallPreparer(validator);
+        this.scheduler = createScheduler();
     }
 
     public CompletionStage<AiToolResultContent> execute(
             AiToolContext context, AiRegisteredTool tool, AiToolCallContent call) {
-        long started = System.nanoTime();
-        return executeChecked(context, tool, call).whenComplete((result, failure) -> audit.record(
-                context.playerId().toString(), tool.definition().name(),
-                failure != null ? "failure" : result.error() ? "error" : "success",
-                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)));
+        return execute(context, tool, call, new AiToolExecutionLedger(), UUID.randomUUID().toString());
+    }
+
+    public CompletionStage<AiToolResultContent> execute(
+            AiToolContext context, AiRegisteredTool tool, AiToolCallContent call,
+            AiToolExecutionLedger ledger) {
+        return execute(context, tool, call, ledger, UUID.randomUUID().toString());
+    }
+
+    public CompletionStage<AiToolResultContent> execute(
+            AiToolContext context, AiRegisteredTool tool, AiToolCallContent call,
+            AiToolExecutionLedger ledger, String correlationId) {
+        return executeChecked(context, tool, call, ledger, correlationId, System.nanoTime());
     }
 
     private CompletionStage<AiToolResultContent> executeChecked(
-            AiToolContext context, AiRegisteredTool tool, AiToolCallContent call) {
+            AiToolContext context, AiRegisteredTool tool, AiToolCallContent call,
+            AiToolExecutionLedger ledger, String correlationId, long startedNanos) {
         String invalid = invalidReason(context, tool, call);
         if (invalid != null) return CompletableFuture.completedFuture(error(call, invalid));
-        return approval.request(context, tool, call).thenCompose(decision -> {
+        AiPreparedToolCall prepared;
+        try {
+            prepared = preparer.prepare(
+                    context, tool, call, correlationId, Instant.now());
+        } catch (IllegalArgumentException failure) {
+            return CompletableFuture.completedFuture(
+                    error(call, I18n.as("ai.tool.error.schema", failure.getMessage())));
+        }
+        return approval.request(prepared).thenCompose(decision -> {
             if (decision != AiToolApprovalDecision.APPROVED) {
+                audit.record(prepared, decision.name().toLowerCase(java.util.Locale.ROOT),
+                        AiToolExecutionState.FAILURE, elapsedMillis(startedNanos));
                 return CompletableFuture.completedFuture(error(call, approvalError(decision)));
             }
-            String rechecked = invalidReason(context, tool, call);
+            String rechecked = invalidPreparedReason(prepared);
             if (rechecked != null) return CompletableFuture.completedFuture(error(call, rechecked));
-            return dispatcher.dispatch(tool.definition().executionMode(),
-                            () -> tool.handler().execute(context, call.arguments()))
-                    .toCompletableFuture()
-                    .orTimeout(tool.definition().timeout().toMillis(), TimeUnit.MILLISECONDS)
-                    .handle((result, failure) -> failure == null
-                            ? content(call, result)
-                            : error(call, I18n.as(failure instanceof TimeoutException
-                                    ? "ai.tool.error.timeout" : "ai.tool.error.execution_failed")));
+            return dispatcher.dispatch(
+                            tool.definition().executionMode(), prepared.deadline(), Clock.systemUTC(), () -> {
+                                String insideExecutor = invalidPreparedReason(prepared);
+                                if (insideExecutor != null) {
+                                    return CompletableFuture.failedFuture(
+                                            new PreparedCallRejectedException(insideExecutor));
+                                }
+                                return tool.handler().execute(context, prepared.arguments());
+                            })
+                    .thenCompose(outcome -> {
+                        if (outcome.state() == AiToolExecutionState.EXPIRED_BEFORE_START) {
+                            audit.record(prepared, "approved",
+                                    AiToolExecutionState.EXPIRED_BEFORE_START, elapsedMillis(startedNanos));
+                            return CompletableFuture.completedFuture(
+                                    error(call, I18n.as("ai.tool.error.expired")));
+                        }
+                        ledger.recordStarted(tool);
+                        return awaitStartedCall(
+                                prepared, call, outcome.completion(), "approved", startedNanos);
+                    });
         });
+    }
+
+    private String invalidPreparedReason(AiPreparedToolCall prepared) {
+        AiToolContext context = prepared.context();
+        AiRegisteredTool tool = prepared.tool();
+        if (Instant.now().isAfter(prepared.deadline())) return I18n.as("ai.tool.error.expired");
+        if (!onlineCheck.test(context)) return I18n.as("ai.tool.error.player_unavailable");
+        if (!tool.owner().isEnabled()) return I18n.as("ai.tool.error.unavailable");
+        if (!permissionCheck.test(context, tool.definition().permission())) {
+            return I18n.as("ai.tool.error.permission_revoked");
+        }
+        return null;
     }
 
     private String invalidReason(AiToolContext context, AiRegisteredTool tool, AiToolCallContent call) {
@@ -85,9 +138,8 @@ public final class AiToolExecutor {
         if (!permissionCheck.test(context, tool.definition().permission())) {
             return I18n.as("ai.tool.error.permission_revoked");
         }
-        if (!tool.definition().name().equals(call.name())) return I18n.as("ai.tool.error.unavailable");
-        List<String> errors = validator.validate(tool.definition().inputSchema(), call.arguments());
-        return errors.isEmpty() ? null : I18n.as("ai.tool.error.schema", String.join("; ", errors));
+        return tool.definition().name().equals(call.name())
+                ? null : I18n.as("ai.tool.error.unavailable");
     }
 
     private static String approvalError(AiToolApprovalDecision decision) {
@@ -101,14 +153,97 @@ public final class AiToolExecutor {
     }
 
     private static AiToolResultContent content(AiToolCallContent call, AiToolResult result) {
-        return new AiToolResultContent(call.id(), call.name(), truncate(result.content()), result.error());
+        return new AiToolResultContent(
+                call.id(), call.name(), truncate(result.content()), result.error(), call.attributes());
     }
 
     private static AiToolResultContent error(AiToolCallContent call, String message) {
-        return new AiToolResultContent(call.id(), call.name(), truncate(message), true);
+        return new AiToolResultContent(
+                call.id(), call.name(), truncate(message), true, call.attributes());
     }
 
     private static String truncate(String value) {
         return value.length() <= MAX_RESULT_CHARS ? value : value.substring(0, MAX_RESULT_CHARS);
+    }
+
+    private CompletionStage<AiToolResultContent> awaitStartedCall(
+            AiPreparedToolCall prepared,
+            AiToolCallContent call,
+            CompletionStage<AiToolResult> underlying,
+            String confirmation,
+            long startedNanos) {
+        CompletableFuture<AiToolResultContent> terminal = new CompletableFuture<>();
+        AtomicBoolean terminalClaimed = new AtomicBoolean();
+        long remainingMillis = Math.max(1L,
+                Duration.between(Instant.now(), prepared.deadline()).toMillis());
+        ScheduledFuture<?> timeout = scheduler.schedule(() -> {
+            boolean uncertain = prepared.tool().definition().risk()
+                    != com.mohistmc.youer.api.ai.tool.AiToolRisk.READ_ONLY;
+            if (terminalClaimed.compareAndSet(false, true)) {
+                audit.record(prepared, confirmation, uncertain
+                                ? AiToolExecutionState.TIMED_OUT_STATE_UNKNOWN
+                                : AiToolExecutionState.TIMEOUT,
+                        elapsedMillis(startedNanos));
+                terminal.complete(error(call, I18n.as(uncertain
+                        ? "ai.tool.error.timeout_state_unknown" : "ai.tool.error.timeout")));
+            }
+        }, remainingMillis, TimeUnit.MILLISECONDS);
+        underlying.whenComplete((result, failure) -> {
+            Throwable cause = unwrap(failure);
+            AiToolResultContent completed;
+            if (cause == null) {
+                completed = content(call, result);
+            } else if (cause instanceof PreparedCallRejectedException rejected) {
+                completed = error(call, rejected.getMessage());
+            } else {
+                completed = error(call, I18n.as("ai.tool.error.execution_failed"));
+            }
+            if (terminalClaimed.compareAndSet(false, true)) {
+                timeout.cancel(false);
+                audit.record(prepared, confirmation,
+                        cause == null && !completed.error()
+                                ? AiToolExecutionState.SUCCESS : AiToolExecutionState.FAILURE,
+                        elapsedMillis(startedNanos));
+                terminal.complete(completed);
+            } else {
+                audit.record(prepared, confirmation,
+                        cause == null ? AiToolExecutionState.LATE_SUCCESS
+                                : AiToolExecutionState.LATE_FAILURE,
+                        elapsedMillis(startedNanos));
+            }
+        });
+        return terminal;
+    }
+
+    @Override
+    public void close() {
+        scheduler.shutdownNow();
+    }
+
+    private static ScheduledExecutorService createScheduler() {
+        return Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "Youer AI Tool Timeout");
+            thread.setDaemon(true);
+            return thread;
+        });
+    }
+
+    private static long elapsedMillis(long startedNanos) {
+        return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
+    }
+
+    private static Throwable unwrap(Throwable failure) {
+        Throwable current = failure;
+        while (current instanceof java.util.concurrent.CompletionException
+                && current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current;
+    }
+
+    private static final class PreparedCallRejectedException extends RuntimeException {
+        private PreparedCallRejectedException(String message) {
+            super(message);
+        }
     }
 }

@@ -2,6 +2,10 @@ package com.mohistmc.youer.commands;
 
 import com.mohistmc.youer.ai.AiChatHandler;
 import com.mohistmc.youer.ai.AiChatService;
+import com.mohistmc.youer.ai.AiInitializationStatus;
+import com.mohistmc.youer.ai.AiLifecycle;
+import com.mohistmc.youer.ai.admission.AiAdmissionMetrics;
+import com.mohistmc.youer.ai.metrics.AiMetricsSnapshot;
 import com.mohistmc.youer.ai.history.AiConversationSnapshot;
 import com.mohistmc.youer.api.gui.DemoGUI;
 import com.mohistmc.youer.api.gui.GUIItem;
@@ -20,13 +24,14 @@ import org.jetbrains.annotations.NotNull;
 
 public final class AiCommand extends BukkitCommand {
 
-    private static final List<String> PARAMETERS = List.of("history", "clearall", "clear", "tools", "confirm", "cancel");
+    private static final List<String> PARAMETERS = List.of(
+            "history", "clearall", "clear", "tools", "confirm", "cancel", "status");
 
     public AiCommand(String name) {
         super(name);
         this.description = "AI chat administration";
-        this.usageMessage = "/ai <clear|clearall|history|tools|confirm|cancel>";
-        this.setPermission("youer.command.ai;youer.ai.tools.use");
+        this.usageMessage = "/ai <clear|clearall|history|tools|confirm|cancel|status>";
+        this.setPermission("youer.command.ai;youer.ai.tools.use;youer.command.ai.admin");
     }
 
     @Override
@@ -35,6 +40,10 @@ public final class AiCommand extends BukkitCommand {
         String subcommand = args.length == 0 ? "" : args[0].toLowerCase(java.util.Locale.ROOT);
         if (!mayUseSubcommand(sender, subcommand)) {
             sender.sendMessage(I18n.as("ai.command.no_permission"));
+            return true;
+        }
+        if ("status".equals(subcommand)) {
+            formatStatus(AiLifecycle.status(), AiChatHandler.service()).forEach(sender::sendMessage);
             return true;
         }
         if (!(sender instanceof Player player)) {
@@ -77,10 +86,41 @@ public final class AiCommand extends BukkitCommand {
     }
 
     static boolean mayUseSubcommand(CommandSender sender, String subcommand) {
+        if ("status".equals(subcommand)) {
+            return sender.hasPermission("youer.command.ai.admin");
+        }
         if (sender.hasPermission("youer.command.ai")) return true;
         return ("confirm".equals(subcommand) || "cancel".equals(subcommand) || "tools".equals(subcommand))
                 && sender.hasPermission("youer.ai.use")
                 && sender.hasPermission("youer.ai.tools.use");
+    }
+
+    static List<String> formatStatus(AiInitializationStatus initialization, AiChatService service) {
+        List<String> lines = new ArrayList<>();
+        String none = I18n.as("ai.command.status.none");
+        lines.add(I18n.as("ai.command.status.header", initialization.state(),
+                initialization.errorCategory().isBlank() ? none : initialization.errorCategory()));
+        if (service == null) {
+            lines.add(I18n.as("ai.command.status.runtime_unavailable"));
+            return List.copyOf(lines);
+        }
+        AiAdmissionMetrics admission = service.admissionMetrics();
+        AiMetricsSnapshot metrics = service.metrics();
+        lines.add(I18n.as("ai.command.status.runtime", service.runtime().enabled(),
+                service.runtime().profile().provider(), service.runtime().profile().model()));
+        lines.add(I18n.as("ai.command.status.admission", admission.active(), admission.waiting(),
+                admission.rejected(), service.histories().size()));
+        lines.add(I18n.as("ai.command.status.provider", metrics.providerRequests(),
+                metrics.providerFailures(), metrics.inputTokens(), metrics.outputTokens(),
+                metrics.lastReturnedModel().isBlank() ? none : metrics.lastReturnedModel()));
+        String outcomes = metrics.toolOutcomes().entrySet().stream()
+                .filter(entry -> entry.getValue() > 0)
+                .sorted(Map.Entry.comparingByKey())
+                .map(entry -> entry.getKey().name().toLowerCase(java.util.Locale.ROOT)
+                        + "=" + entry.getValue())
+                .collect(java.util.stream.Collectors.joining(","));
+        lines.add(I18n.as("ai.command.status.tools", outcomes.isEmpty() ? none : outcomes));
+        return List.copyOf(lines);
     }
 
     private static void clear(

@@ -13,9 +13,11 @@ public final class AiConfirmationNotifier {
     public void notify(AiPendingAction action) {
         Player player = players.apply(action.playerId());
         if (player != null) {
-            player.sendMessage(Component.text(I18n.as("ai.tool.confirmation.required", action.summary()),
+            player.sendMessage(Component.text(I18n.as("ai.tool.confirmation.required", ""),
                             NamedTextColor.YELLOW)
-                    .append(Component.space())
+                    .append(Component.newline())
+                    .append(action.summary())
+                    .append(Component.newline())
                     .append(Component.text(I18n.as("ai.tool.confirmation.confirm"), NamedTextColor.GREEN)
                             .clickEvent(ClickEvent.runCommand("/ai confirm " + action.id())))
                     .append(Component.space())

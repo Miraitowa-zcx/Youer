@@ -70,8 +70,14 @@ public final class AiToolRegistry {
 
     public synchronized AiRegisteredTool registered(
             AiToolOwner owner, AiToolDefinition definition, AiToolHandler handler) {
+        return registered(owner, definition, handler, AiToolArgumentPreparer.identity());
+    }
+
+    public synchronized AiRegisteredTool registered(
+            AiToolOwner owner, AiToolDefinition definition, AiToolHandler handler,
+            AiToolArgumentPreparer argumentPreparer) {
         schemaValidator.validateSchema(definition.inputSchema());
-        return new AiRegisteredTool(owner, definition, handler);
+        return new AiRegisteredTool(owner, definition, handler, argumentPreparer);
     }
 
     public synchronized void unregister(Plugin plugin) {

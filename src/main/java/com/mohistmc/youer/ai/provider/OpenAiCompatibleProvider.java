@@ -103,10 +103,10 @@ public final class OpenAiCompatibleProvider implements AiProvider {
         }
         Json calls = Json.array();
         for (AiContentPart part : item.content()) {
-            if (part instanceof AiToolCallContent(String id, String name, Json arguments)) {
-                calls.add(Json.object().set("id", id).set("type", "function")
-                        .set("function", Json.object().set("name", name)
-                                .set("arguments", arguments.toString())));
+            if (part instanceof AiToolCallContent call) {
+                calls.add(Json.object().set("id", call.id()).set("type", "function")
+                        .set("function", Json.object().set("name", call.name())
+                                .set("arguments", call.arguments().toString())));
             }
         }
         if (!calls.asJsonList().isEmpty()) {

@@ -14,6 +14,7 @@ public final class AiToolPermissions {
     }
     public static void ensureOpDefault(String node) { ensureOpDefault(node, "AI tool permission"); }
     private static void ensureOpDefault(String node, String description) {
+        if (Bukkit.getServer() == null) return;
         if (Bukkit.getPluginManager().getPermission(node) == null) {
             DefaultPermissions.registerPermission(node, description, PermissionDefault.OP);
         }

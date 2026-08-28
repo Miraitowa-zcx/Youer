@@ -49,7 +49,10 @@ public final class AiAgentLoop {
                             && !plainFallback && !definitions.isEmpty()) {
                         return step(request, messages, turnStart, steps, calls, true, providerExecutor);
                     }
-                    return CompletableFuture.<AiAgentResult>failedFuture(cause);
+                    boolean mayHaveCompleted = request.ledger().actionsMayHaveCompleted();
+                    AiConversationTurn compact = compactFailureTurn(messages, turnStart, mayHaveCompleted);
+                    return CompletableFuture.<AiAgentResult>failedFuture(
+                            new AiAgentFailure(mayHaveCompleted, cause, compact));
                 })
                 .thenCompose(Function.identity());
     }
@@ -78,7 +81,8 @@ public final class AiAgentLoop {
         for (int index = 0; index < toolCalls.size(); index++) {
             AiToolCallContent call = toolCalls.get(index);
             AiRegisteredTool tool = resolved.get(index);
-            chain = chain.thenCompose(ignored -> executor.execute(request.context(), tool, call)
+            chain = chain.thenCompose(ignored -> executor.execute(
+                            request.context(), tool, call, request.ledger(), request.correlationId())
                     .thenAccept(result -> messages.add(new AiMessage(
                             AiRole.TOOL, List.of(result), Map.of()))));
         }
@@ -112,5 +116,14 @@ public final class AiAgentLoop {
 
     private static <T> CompletionStage<T> failed(String message) {
         return CompletableFuture.failedFuture(new IllegalStateException(message));
+    }
+
+    private static AiConversationTurn compactFailureTurn(
+            List<AiMessage> messages, int turnStart, boolean actionsMayHaveCompleted) {
+        AiMessage user = messages.get(turnStart);
+        String text = actionsMayHaveCompleted
+                ? "The AI request failed after Tool actions may have completed. Verify server state before retrying."
+                : "The AI request failed before a final response was available.";
+        return new AiConversationTurn(List.of(user, new AiMessage(AiRole.ASSISTANT, text)));
     }
 }

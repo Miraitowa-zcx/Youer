@@ -18,12 +18,14 @@ import java.util.concurrent.CompletionStage;
 
 final class ProviderSupport {
 
+    private static final int MAX_RESPONSE_BYTES = 1_048_576;
+
     private ProviderSupport() {
     }
 
     static CompletionStage<AiHttpResponse> execute(AiProfile profile, AiHttpClient client, AiHttpRequest request) {
         try {
-            return client.execute(request, profile.timeout()).handle((response, failure) -> {
+            return client.execute(request, profile.timeout(), MAX_RESPONSE_BYTES).handle((response, failure) -> {
                 if (failure != null) {
                     throw transportFailure(profile, failure);
                 }
@@ -37,8 +39,11 @@ final class ProviderSupport {
     private static RuntimeException transportFailure(AiProfile profile, Throwable failure) {
         Throwable cause = unwrap(failure);
         if (cause instanceof AiHttpException exception) {
+            AiErrorType type = exception.timeout()
+                    ? AiErrorType.TIMEOUT
+                    : exception.responseTooLarge() ? AiErrorType.INVALID_RESPONSE : AiErrorType.HTTP;
             return new AiProviderException(
-                    exception.timeout() ? AiErrorType.TIMEOUT : AiErrorType.HTTP,
+                    type,
                     profile.provider(),
                     null,
                     null,

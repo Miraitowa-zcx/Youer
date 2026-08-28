@@ -1,5 +1,6 @@
 package com.mohistmc.youer.ai.tool.confirmation;
 
+import com.mohistmc.youer.ai.tool.AiPreparedToolCall;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -18,14 +19,15 @@ public final class AiConfirmationStore {
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
-    public AiPendingAction create(UUID playerId, String summary, Duration timeout) {
+    public AiPendingAction create(AiPreparedToolCall preparedCall, Duration timeout) {
         if (timeout == null || timeout.isZero() || timeout.isNegative()) {
             throw new IllegalArgumentException("Confirmation timeout must be positive");
         }
         Instant created = clock.instant();
         AiPendingAction action = new AiPendingAction(UUID.randomUUID().toString().replace("-", ""),
-                playerId, summary, created, created.plus(timeout), new CompletableFuture<>());
-        AiPendingAction replaced = pending.put(playerId, action);
+                preparedCall.context().playerId(), preparedCall, preparedCall.displaySummary(),
+                created, created.plus(timeout), new CompletableFuture<>());
+        AiPendingAction replaced = pending.put(action.playerId(), action);
         if (replaced != null) replaced.future().complete(AiConfirmationDecision.REPLACED);
         CompletableFuture.delayedExecutor(Math.max(1L, timeout.toMillis()), TimeUnit.MILLISECONDS)
                 .execute(() -> expire(action));

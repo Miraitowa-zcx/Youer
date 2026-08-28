@@ -66,9 +66,10 @@ public final class AnthropicProvider implements AiProvider {
             for (AiContentPart part : item.content()) {
                 if (part instanceof AiTextContent(String text1)) {
                     blocks.add(Json.object().set("type", "text").set("text", text1));
-                } else if (part instanceof AiToolCallContent(String id, String name, Json arguments)) {
-                    blocks.add(Json.object().set("type", "tool_use").set("id", id)
-                            .set("name", name).set("input", Json.read(arguments.toString())));
+                } else if (part instanceof AiToolCallContent call) {
+                    blocks.add(Json.object().set("type", "tool_use").set("id", call.id())
+                            .set("name", call.name())
+                            .set("input", Json.read(call.arguments().toString())));
                 } else if (part instanceof AiToolResultContent result) {
                     blocks.add(Json.object().set("type", "tool_result").set("tool_use_id", result.callId())
                             .set("content", result.content()).set("is_error", result.error()));

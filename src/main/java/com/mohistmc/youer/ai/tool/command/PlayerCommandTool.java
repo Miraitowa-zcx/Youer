@@ -12,17 +12,18 @@ import org.bukkit.entity.Player;
 
 public final class PlayerCommandTool implements AiToolHandler {
     private final AiCommandGateway gateway;
-    private final AiCommandSanitizer sanitizer;
     private final Function<UUID, Player> players;
 
-    public PlayerCommandTool(AiCommandGateway gateway, AiCommandSanitizer sanitizer, Function<UUID, Player> players) {
-        this.gateway = gateway; this.sanitizer = sanitizer; this.players = players;
+    public PlayerCommandTool(AiCommandGateway gateway, Function<UUID, Player> players) {
+        this.gateway = gateway; this.players = players;
     }
     @Override public CompletionStage<AiToolResult> execute(AiToolContext context, Json arguments) {
         Player player = players.apply(context.playerId());
         if (player == null) return CompletableFuture.completedFuture(AiToolResult.error("Player is offline"));
-        String command = sanitizer.normalize(arguments.at("command").asString());
+        String command = arguments.at("command").asString();
         return CompletableFuture.completedFuture(gateway.dispatchPlayer(player, command)
-                ? AiToolResult.success("Command dispatched") : AiToolResult.error("Command was not dispatched"));
+                ? AiToolResult.success("Bukkit accepted the command dispatch; this does not prove the command's "
+                        + "business outcome. Validate observable server state before claiming success.")
+                : AiToolResult.error("Command was not dispatched"));
     }
 }
